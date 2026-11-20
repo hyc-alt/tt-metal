@@ -303,6 +303,22 @@ ProgramDescriptor SliceWriteRMShardedInputProgramFactory::create_descriptor(
         "Input & output should have the same data format, {} , {}",
         input_cb_data_format,
         output_cb_data_format);
+    const auto iter_cores = corerange_to_cores(input_cores, std::nullopt, rm_orientation);
+
+    auto all_runtime_args = get_slice_write_runtime_args_rm_sharded_input(
+        input, output, output_tensor_start, output_tensor_end, iter_cores, max_read_size);
+
+    const uint32_t l1_alignment = hal::get_l1_alignment();
+    bool needs_scratch = (input_row_size_bytes & (l1_alignment - 1)) != 0;
+    if (!needs_scratch) {
+        for (const auto& [_, writer_args] : all_runtime_args) {
+            if ((writer_args[kSliceWriteRmShardedWriterAddressArgIdx] & (l1_alignment - 1)) != 0) {
+                needs_scratch = true;
+                break;
+            }
+        }
+    }
+
     desc.cbs.push_back(make_slice_cb_descriptor(
         src0_cb_index,
         input_cores,
@@ -310,12 +326,11 @@ ProgramDescriptor SliceWriteRMShardedInputProgramFactory::create_descriptor(
         num_input_sticks_per_core,
         input_cb_data_format,
         input_buffer));
-    desc.cbs.push_back(make_slice_cb_descriptor(
-        kSliceWriteRmShardedScratchCbIndex,
-        input_cores,
-        input_row_size_bytes_offset + src_buffer_alignment,
-        1,
-        input_cb_data_format));
+    const uint32_t scratch_page_size = input_row_size_bytes_offset + src_buffer_alignment;
+    if (needs_scratch) {
+        desc.cbs.push_back(make_slice_cb_descriptor(
+            kSliceWriteRmShardedScratchCbIndex, input_cores, scratch_page_size, 2, input_cb_data_format));
+    }
 
     std::vector<uint32_t> reader_compile_time_args = {(std::uint32_t)src0_cb_index};
     std::vector<uint32_t> writer_compile_time_args_vec = {(std::uint32_t)src0_cb_index, 0};
@@ -336,13 +351,12 @@ ProgramDescriptor SliceWriteRMShardedInputProgramFactory::create_descriptor(
     writer_kernel.source_type = KernelDescriptor::SourceType::FILE_PATH;
     writer_kernel.core_ranges = input_cores;
     writer_kernel.compile_time_args = std::move(writer_compile_time_args_vec);
-    writer_kernel.defines = {{"SHARDED_RM_SCRATCH_CB", std::to_string(kSliceWriteRmShardedScratchCbIndex)}};
+    if (needs_scratch) {
+        writer_kernel.defines = {
+            {"SHARDED_RM_SCRATCH_CB", std::to_string(kSliceWriteRmShardedScratchCbIndex)},
+            {"SHARDED_RM_SCRATCH_PAGE_SIZE", std::to_string(scratch_page_size)}};
+    }
     writer_kernel.config = WriterConfigDescriptor{};
-
-    const auto iter_cores = corerange_to_cores(input_cores, std::nullopt, rm_orientation);
-
-    auto all_runtime_args = get_slice_write_runtime_args_rm_sharded_input(
-        input, output, output_tensor_start, output_tensor_end, iter_cores, max_read_size);
 
     uint32_t i = 0;
     for (const auto& core : iter_cores) {

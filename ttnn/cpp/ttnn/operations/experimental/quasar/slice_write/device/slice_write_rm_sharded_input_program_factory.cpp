@@ -241,9 +241,16 @@ ttnn::device_operation::ProgramArtifacts SliceWriteRMShardedInputProgramFactory:
 
     const uint32_t num_input_sticks_per_core = shard_spec.shape[0];
     const uint32_t input_row_size_bytes = shard_spec.shape[1] * input.element_size();
+    const bool is_block_sharded = input.memory_config().memory_layout() == TensorMemoryLayout::BLOCK_SHARDED;
+    const uint32_t l1_alignment = ::hal::get_l1_alignment();
+    TT_FATAL(
+        !is_block_sharded || (input_row_size_bytes & (l1_alignment - 1)) == 0,
+        "Quasar slice_write RM block-sharded input requires input_row_size_bytes ({}) to be aligned to {} bytes",
+        input_row_size_bytes,
+        l1_alignment);
     const auto src_buffer_alignment = input.memory_config().buffer_type() == tt::tt_metal::BufferType::DRAM
                                           ? ::hal::get_dram_alignment()
-                                          : ::hal::get_l1_alignment();
+                                          : l1_alignment;
     const uint32_t input_row_size_bytes_offset = tt::round_up(input_row_size_bytes, src_buffer_alignment);
     const uint32_t max_read_size = 4096;
     const uint32_t num_dims = static_cast<uint32_t>(input_shape.rank());
@@ -325,6 +332,11 @@ ttnn::device_operation::ProgramArtifacts SliceWriteRMShardedInputProgramFactory:
         AddRuntimeArgsForNode(reader_rtas, core, {{"num_sticks", r[0]}});
         // w[0] is the (aligned) dst base addr + width_offset; recover the per-core byte offset from the base.
         const uint32_t dst_byte_offset = w[0] - out_addr;
+        TT_FATAL(
+            (dst_byte_offset & (l1_alignment - 1)) == 0,
+            "Quasar slice_write RM sharded input requires dst_byte_offset ({}) to be aligned to {} bytes",
+            dst_byte_offset,
+            l1_alignment);
         AddRuntimeArgsForNode(
             writer_rtas,
             core,
